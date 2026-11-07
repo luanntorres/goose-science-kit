@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Node (for mermaid-cli / any skill tooling)
+node_modules/
+.npm/
+
+# Review output (per-run results, not part of the installable kit)
+reviews/
+systematic_review/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Secrets — never commit real keys (template .env.example is fine)
+.env
+*.env.local
+*.pem
+*.key

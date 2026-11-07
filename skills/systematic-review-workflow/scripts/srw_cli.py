@@ -3,12 +3,14 @@
 Orchestrates the mechanical parts of a systematic review: workspace
 initialisation, protocol persistence, search-result ingestion and
 deduplication, screening decision recording, full-text manifest
-hashing, evidence-matrix validation, and PRISMA report generation.
+hashing, evidence-matrix validation, PRISMA report generation, and a
+self-contained HTML web portal + readable artifact viewer for delivery.
 
 Design: stdlib only (urllib for the optional OpenAlex PDF download),
 argparse subcommands, file-first output, append-only JSONL audit log.
 """
 
+import subprocess
 import argparse
 import csv
 import hashlib
@@ -214,6 +216,9 @@ def download(url: str, out_path: str, timeout: int = 60) -> None:
     data = resp.read()
   if not data:
     raise RuntimeError(f"Empty response from {url}")
+  # Reject HTML error pages / Cloudflare challenge screens that are not PDFs.
+  if data[:5] != b"%PDF-":
+    raise RuntimeError(f"Response from {url} is not a PDF (likely paywalled/HTML error page)")
   with open(out_path, "wb") as f:
     f.write(data)
 
@@ -423,35 +428,43 @@ def cmd_fetch_fulltext(args) -> None:
     if i in have:
       continue
     rec = records[i]
-    url = rec.get("pdf_url")
-    if args.source == "openalex" and rec.get("openalex_id") and key:
-      url = f"https://content.openalex.org/{rec['openalex_id']}.pdf"
-    if not url:
+    # Prefer the record's own open-access pdf_url (often works without the
+    # content server); fall back to content.openalex.org for OpenAlex works.
+    candidates = []
+    oa_url = rec.get("pdf_url") or ((rec.get("raw") or {}).get("open_access") or {}).get("oa_url")
+    if oa_url and str(oa_url).startswith("http") and "content.openalex.org" not in str(oa_url):
+      candidates.append(str(oa_url))
+    if rec.get("openalex_id") and key:
+      candidates.append(f"https://content.openalex.org/{rec['openalex_id']}.pdf")
+    out_path = os.path.join(p["pdfs_dir"], f"study_{i:03d}.pdf")
+    ok = False
+    last_err = None
+    for url in candidates:
+      try:
+        download(url, out_path)
+        manifest.append({
+            "record_index": i,
+            "title": rec.get("title"),
+            "doi": rec.get("doi"),
+            "path": out_path,
+            "sha256": sha256_of(out_path),
+            "fetched_at": now_iso(),
+        })
+        fetched += 1
+        ok = True
+        break
+      except Exception as e:
+        last_err = e
+        if os.path.exists(out_path):
+          os.remove(out_path)
+    if not ok:
       failed += 1
-      continue
-    seq = included.index(i) + 1
-    safe_name = "study_%03d" % seq
-    out_path = os.path.join(p["pdfs_dir"], f"{safe_name}.pdf")
-    try:
-      download(url, out_path)
-      manifest.append({
-          "record_index": i,
-          "title": rec.get("title"),
-          "doi": rec.get("doi"),
-          "path": out_path,
-          "sha256": sha256_of(out_path),
-          "fetched_at": now_iso(),
-      })
-      fetched += 1
-    except Exception as e:
-      failed += 1
-      print(f"Warning: failed to fetch PDF for record {i}: {e}", file=sys.stderr)
       manifest.append({
           "record_index": i,
           "title": rec.get("title"),
           "doi": rec.get("doi"),
           "path": None,
-          "error": str(e),
+          "error": str(last_err) if last_err else "no URL",
           "fetched_at": now_iso(),
       })
 
@@ -508,6 +521,9 @@ def cmd_screen_fulltext(args) -> None:
   abstract_included = _included_indices(p)
   include = set(parse_indices(args.include))
   exclude = set(parse_indices(args.exclude))
+  # Exclusions are authoritative: drop any index that appears in both.
+  if include & exclude:
+    include -= exclude
   if not include:
     sys.exit("Error: provide at least one --include index")
   if not (include | exclude) <= set(abstract_included):
@@ -536,6 +552,14 @@ def cmd_screen_fulltext(args) -> None:
           for i in sorted(exclude)
       ],
   }
+  # How many of the included have a full-text PDF on disk vs abstract-only.
+  have_ids = set()
+  if os.path.exists(p["pdf_manifest"]):
+    for m in read_json(p["pdf_manifest"]) or []:
+      if isinstance(m, dict) and m.get("path"):
+        have_ids.add(m.get("record_index"))
+  log["fulltext_available"] = sum(1 for i in include if i in have_ids)
+  log["abstract_only"] = sum(1 for i in include if i not in have_ids)
   write_json(p["fulltext_log"], log)
   append_audit(p, "step_5_fulltext_screening",
                f"Full-text screening: {len(include)} included, {len(exclude)} excluded with rationale",
@@ -644,7 +668,7 @@ def _write_prisma_flow(p: dict, c: dict) -> None:
       '  C["Screened at title/abstract<br/>(n=' + str(c["screened_abstract"]) + ')"]',
       '  D["Excluded at abstract<br/>(n=' + str(c["abstract_excluded"]) + ')"]',
       '  E["Full-text screened<br/>(n=' + str(c["fulltext_screened"]) + ')"]',
-      '  F["Excluded at full-text<br/>(n=' + str(c["fulltext_excluded"]) + '")"]',
+      '  F["Excluded at full-text<br/>(n=' + str(c["fulltext_excluded"]) + ')"]',
       '  G[\"Included in review<br/>(n=' + str(c["fulltext_included"]) + ')"]',
       "  A --> B --> C",
       "  C --> D",
@@ -852,8 +876,71 @@ def cmd_report(args) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Argument parsing
+# Step 8 — Web portal (self-contained HTML + readable artifact viewer)
 # ---------------------------------------------------------------------------
+
+def cmd_portal(args) -> None:
+  """Generate the self-contained HTML portal and the artifact viewer.
+
+  Runs:
+    scripts/gen_portal.py        ->  index.html (review root) + report/index.html
+    scripts/gen_viewer_data.py   ->  viewer.html (review root, embedded artifacts)
+
+  Both scripts read the review workspace rooted at --output-dir; the template
+  for the viewer is shipped in the skill's assets/ directory. The output is
+  a single self-contained file per artifact (no external CDN, no build step)
+  and works from file:// (double-click) or over HTTP/Caddy.
+  """
+  p = ensure_workspace(args.output_dir)
+  scripts_dir = os.path.dirname(os.path.abspath(__file__))
+  env = dict(os.environ)
+  env["SRW_OUTPUT_DIR"] = p["root"]
+  env["SRW_VIEWER_TEMPLATE"] = os.path.normpath(
+      os.path.join(scripts_dir, "..", "assets", "viewer_template.html"))
+  # Allow overriding the viewer template location without editing the script.
+  if getattr(args, "template", ""):
+    env["SRW_VIEWER_TEMPLATE"] = args.template
+
+  def run(script):
+    cmd = [sys.executable, os.path.join(scripts_dir, script)]
+    r = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    if r.stdout:
+      print(r.stdout.rstrip())
+    if r.returncode != 0:
+      if r.stderr:
+        print(r.stderr.rstrip(), file=sys.stderr)
+      sys.exit(f"Error: {script} failed (exit {r.returncode})")
+
+  try:
+    run("gen_portal.py")
+    run("gen_viewer_data.py")
+  except SystemExit as e:
+    append_audit(p, "step_8_web_portal_generation",
+                 f"Portal generation failed: {e}", status="FAILED")
+    raise
+  except Exception as e:
+    append_audit(p, "step_8_web_portal_generation",
+                 f"Portal generation failed: {e}", status="FAILED")
+    raise
+
+  # Collect metrics for the audit entry.
+  def _size_mb(path):
+    return round(os.path.getsize(path) / 1024 / 1024, 2) if os.path.exists(path) else None
+  portal_mb = _size_mb(os.path.join(p["root"], "index.html"))
+  viewer_mb = _size_mb(os.path.join(p["root"], "viewer.html"))
+  c = _prisma_counts(p)
+  append_audit(p, "step_8_web_portal_generation",
+               f"Web portal + artifact viewer generated "
+               f"(portal={portal_mb} MB, viewer={viewer_mb} MB, "
+               f"included={c['fulltext_included']})",
+               portal_mb=portal_mb,
+               viewer_mb=viewer_mb,
+               included_in_review=c["fulltext_included"])
+  print(f"\nSuccess! Web portal written to:\n"
+        f"  {os.path.join(p['root'], 'index.html')}   (portal - {portal_mb} MB)\n"
+        f"  {os.path.join(p['root'], 'viewer.html')}  (artifact viewer - {viewer_mb} MB)")
+  print("Both files work from file:// (double-click) and over HTTP/Caddy.")
+
 
 def cmd_status(args) -> None:
   p = ensure_workspace(args.output_dir)
@@ -980,6 +1067,10 @@ def cmd_selftest(_args) -> None:
   sys.exit(rc)
 
 
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
 def main() -> None:
   parser = argparse.ArgumentParser(prog="srw_cli.py",
                                    description="PRISMA 2020 systematic review pipeline CLI.")
@@ -1014,6 +1105,7 @@ def main() -> None:
 
   sp = sub.add_parser("fetch-fulltext", help="Download full-text PDFs and hash them")
   sp.add_argument("--output-dir", required=True)
+  sp.add_argument("--source", default="openalex", help="Source hint for PDF fetch (default: openalex)")
   sp.add_argument("--openalex-api-key", default="")
   sp.set_defaults(func=cmd_fetch_fulltext)
 
@@ -1041,6 +1133,12 @@ def main() -> None:
   sp = sub.add_parser("report", help="Generate PRISMA report, flow diagram and manuscript")
   sp.add_argument("--output-dir", required=True)
   sp.set_defaults(func=cmd_report)
+
+  sp = sub.add_parser("portal", help="Generate the self-contained HTML portal + artifact viewer")
+  sp.add_argument("--output-dir", required=True)
+  sp.add_argument("--template", default="",
+                  help="Override the viewer template path (defaults to the skill's assets/)")
+  sp.set_defaults(func=cmd_portal)
 
   sp = sub.add_parser("verify", help="Verify the audit ledger (checksums + chronology)")
   sp.add_argument("--output-dir", required=True)

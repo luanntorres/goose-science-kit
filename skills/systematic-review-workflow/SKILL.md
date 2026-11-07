@@ -3,7 +3,8 @@ name: systematic-review-workflow
 description: >
   Executes an end-to-end, PRISMA 2020 and framework-guided (PICO, PECO, SPIDER, CIMO)
   literature selection, extraction, and synthesis pipeline with immutable lab notebook
-  audit logs. Use when the user asks for a systematic review, meta-analysis, evidence
+  audit logs, finishing with a self-contained HTML web portal and a readable artifact
+  viewer. Use when the user asks for a systematic review, meta-analysis, evidence
   synthesis, or structured literature search with screening and reporting.
 ---
 
@@ -13,8 +14,9 @@ description: >
 
 End-to-end PRISMA 2020 pipeline: protocol design → multi-database search →
 abstract screening → full-text retrieval → full-text screening → evidence
-extraction → PRISMA report and manuscript. Every decision is logged to an
-immutable JSONL audit trail so the review is fully reproducible.
+extraction → PRISMA report and manuscript → **self-contained HTML web portal +
+artifact viewer**. Every decision is logged to an immutable JSONL audit trail
+so the review is fully reproducible.
 
 ## Dependencies
 
@@ -98,6 +100,12 @@ uv run scripts/srw_cli.py extract \
 # 8. Generate PRISMA report
 uv run scripts/srw_cli.py report \
   --output-dir ./reviews/photobiological-h2
+
+# 9. Generate the self-contained HTML web portal + artifact viewer
+#    (single-file portal + readable JSON/MD/CSV/JSONL viewer; works from
+#     file:// and over HTTP/Caddy). Writes index.html + viewer.html.
+uv run scripts/srw_cli.py portal \
+  --output-dir ./reviews/photobiological-h2
 ```
 
 ## CLI Reference
@@ -167,6 +175,13 @@ Writes SHA-256 hashes to `pdfs/manifest.json`.
 | `--output-dir` | yes | Workspace directory |
 | `--openalex-api-key` | no | Override key (else reads `OPENALEX_API_KEY` from env/`~/.env`) |
 
+> **Drop-in fix:** `scripts/fetch-fulltext-goose-corrected.py` is a standalone
+> replacement that fixes two bugs in the built-in `fetch-fulltext` — (1) the
+> undefined `args.source` reference, and (2) missing `%PDF` magic-byte
+> validation on downloaded files. Run it the same way when you hit either
+> failure:
+> `python3 scripts/fetch-fulltext-goose-corrected.py --output-dir ./reviews/<topic> --record-index 3`
+
 ### `register-pdf`
 Registers an externally fetched PDF for a record, hashing it into the
 manifest. Use when the agent fetched a PDF via a different skill or the user
@@ -214,6 +229,71 @@ Generates:
 | Flag | Required | Description |
 |---|---|---|
 | `--output-dir` | yes | Workspace directory |
+
+### `portal`
+Generates the deliverable **web portal** (and the **artifact viewer** via a sibling
+script). The portal generator (`scripts/gen_portal.py`) is **generic and defensive**:
+
+- **Generic** — it is driven by `protocol.json` (topic, framework, criteria) and by
+  the *column headers* of `synthesis/evidence_matrix.csv`, **not** hard-coded to any
+  one review. Any review this skill produces renders the same way.
+- **Defensive** — it never crashes on a partially-built workspace. **Every one of the
+  8 sections is always rendered**; when a section's data source is missing or empty,
+  that section shows a clear, styled **placeholder stating exactly why** (see the
+  section contract below).
+- **Self-contained** — zero external dependencies, pure inline-SVG charts, relative
+  links. Works from `file://` (double-click) **and** over HTTP/Caddy with no build step.
+
+Outputs (byte-identical copies):
+- `index.html` — the 8-section portal (deliverable).
+- `report/index.html` — a copy for `report/` subpath serving.
+- `viewer.html` — readable renderer for the JSON/JSONL/MD/CSV/Tex/Mermaid artifacts
+  (artifacts are **embedded** into the file, no `fetch`, so it works from `file://`).
+
+**Portal section contract** (always rendered; placeholder explains absence)
+
+| # | Section | Data source(s) | Placeholder if missing |
+|---|---|---|---|
+| 1 | Executive summary & key numbers | `protocol.json`, `data/deduplicated_records.json`, `screening/*`, `synthesis/evidence_matrix.csv`, `pdfs/manifest.json`, `audit_trail/*.jsonl` | Cards/ chips simply omit absent figures; an empty state is shown if nothing exists yet |
+| 2 | Framework (PICO/PECO/…) & PRISMA 2020 | `protocol.json`, `screening/fulltext_exclusion_log.json`, `report/PRISMA_flowchart.svg` | Inclusion/exclusion list shows "(no … recorded yet)"; the flow figure shows a placeholder pointing at `report/prisma_flow.mmd` if the SVG/PNG isn't rendered yet |
+| 3 | Statistical overview (distributions + correlations) | `synthesis/evidence_matrix.csv` | "No distributions: evidence matrix missing or empty — run the extract step" |
+| 4 | Artifact explorer (directory tree) | existence of the files themselves | Lists only files that exist; a "pending" row names files not yet generated |
+| 5 | Evidence matrix | `synthesis/evidence_matrix.csv` | "No evidence matrix: run the extract step" |
+| 6 | PDF repository | `pdfs/manifest.json` (+ resolved PDF paths) | "No PDFs on disk: … fetches failed or no resolved paths … abstract-only records still included" |
+| 7 | Included studies & full-text exclusions | `screening/fulltext_exclusion_log.json`, `data/deduplicated_records.json` | "No full-text screening decisions recorded yet" |
+| 8 | Audit trail | `audit_trail/lab_notebook.jsonl` | "No audit ledger: this workspace has not run the pipeline yet" |
+
+> **Contract rule:** the portal template is fixed and always produces all 8 sections.
+> Missing data is *reported*, never silently dropped — the reader always sees the
+> section and a clear, actionable reason for what it contains.
+
+**Portal UI/UX design spec (frozen — do not change without explicit approval)**
+
+| Aspect | Spec |
+|---|---|
+| **Theme** | Dark mode is the **default** (unchanged). A **Light mode** is available via a fixed top-right toggle button (`◐` / `☀` icon + "Light"/"Dark" label). Preference persists in `localStorage['srw-theme']`. Light theme overrides the same CSS custom properties (`--bg`, `--panel`, `--ink`, `--acc`, etc.) via `body.light{…}` — no separate stylesheet. |
+| **Scrollbars** | All scrollable regions use **high-contrast scrollbars**: 14 px wide/tall, rounded thumb in `var(--th)` (teal `#0d9488` dark / `#0d9488` light), 3 px border matching `--panel2` for a floating-thumb look. Implemented via `scrollbar-color` (Firefox) **and** `::-webkit-scrollbar-thumb` (WebKit/Chrome). Applies globally via `*{scrollbar-color:…}`. |
+| **Included / Excluded lists** | Both panels use **bullet points** (`<ul>`) with a **bold `#NNN` ID** prefix — no `<ol>` auto-numbering, no doubled "1. 1." pattern. Example: `• #5 Neurophysiological Vocal Source Modeling… — https://doi.org/…`. CSS: `.inc-list` and `.excl-list` share the same 13.5 px font, 7 px li margin, 18 px left padding. |
+| **Feature-family chart** | "Dominant feature family" classifies each study into a **single dominant family** (max **5 classes**) — it takes the *first* (dominant) token of `acoustic_features`, folds synonyms onto a canonical set (prosody, pitch/F0, rhythm/temporal, spectral/MFCC, other-micro), and merges any tail beyond the top 4 into "Other". It does **not** count the verbatim feature string (which would yield 40+ near-duplicate bars). |
+| **Headline stats (exec summary)** | Four headline chips computed **generically** from the evidence matrix: ① Mean AUC/ROC (outcome contains "auc"/"roc", normalised 0–1), ② Mean accuracy (outcome contains "acc" but not "auc", shown as %), ③ Dominant feature (top family from the classifier above, as `n/total`), ④ 2023+ studies (count of rows with year ≥ 2023). Each chip is **omitted** when the data isn't present, so the block degrades gracefully for any review. |
+| **Sidenav** | Sticky left sidebar (220 px) with numbered section links; active section highlighted via `IntersectionObserver` scroll-spy. Collapses below 900 px viewport. |
+| **Scroll panels** | Section 5 (matrix) and Section 7 (included/excluded) use full-height scroll panels: `.cols-tall{height:560px}` + `.scrollfill{flex:1;overflow:auto}` so the content scrolls independently while the section header and sidenav stay fixed. |
+| **Self-contained** | Zero external deps (no CDN, no `fetch`, no build step). All CSS/JS inline. SVG charts hand-built. Works from `file://` and HTTP. |
+| **DOI links** | Bare `10.xxx` strings are auto-prefixed to `https://doi.org/10.xxx` in all rendered output. |
+
+| Flag | Required | Description |
+|---|---|---|
+| `--output-dir` | yes | Workspace directory |
+| `--template` | no | Override the viewer template path (defaults to the skill's `assets/viewer_template.html`) |
+
+```bash
+uv run scripts/srw_cli.py portal --output-dir ./reviews/{topic_slug}
+```
+
+> **To re-generate after any change to the underlying artifacts** (a new PDF, an
+> updated matrix, a rendered PRISMA SVG), simply re-run `portal` (or run
+> `scripts/gen_portal.py` with `SRW_OUTPUT_DIR` set to the review root). It is
+> idempotent and cheap.
 
 ### `verify`
 Re-verifies the audit ledger: recomputes every line's checksum, checks JSON
@@ -358,37 +438,90 @@ uv run scripts/srw_cli.py selftest   # exit 0 = PASS, non-zero = FAIL
    address the findings.
 9. Present the PRISMA flow counts and a summary of key findings to the user.
 
-## Directory Structure (per review)
+### Step 8 — Web Portal & Artifact Viewer (delivery)
+1. Call `srw_cli.py portal` to generate the self-contained deliverables:
+   - `index.html` (portal) — the 8-section portal (exec summary; framework & PRISMA
+     flow; statistical overview; artifact explorer; evidence matrix; PDF repository;
+     included/excluded; audit trail). Also copied to `report/index.html`.
+   - `viewer.html` — readable renderer for the JSON / JSONL / Markdown / CSV / LaTeX /
+     Mermaid artifacts (embedded, so no `fetch` needed).
+2. Both files are zero-dependency and link to each other and to the PDFs via
+   **relative paths**, so they work from `file://` (double-click) and over
+   HTTP/Caddy with no build step.
+3. **Graceful degradation:** the template always renders all 8 sections. Any section
+   whose data source is missing/empty shows a clear placeholder explaining *why*
+   (e.g. "No PDFs on disk: fetches were paywalled — abstract-only records are still
+   included"; "No evidence matrix: run the extract step"). The reader always sees the
+   section and an actionable reason — nothing is silently dropped.
+4. Open `index.html` to confirm the evidence matrix, PDF cards, and audit trail render,
+   and that the artifact-explorer links open each file readably in the viewer.
+5. To re-generate after any change to the underlying artifacts (a new PDF, an updated
+   matrix, a rendered PRISMA SVG), simply re-run `srw_cli.py portal` (or run
+   `scripts/gen_portal.py` with `SRW_OUTPUT_DIR` set to the review root).
+
+> **End-to-end (user prompt → self-contained HTML):** the agent runs steps 0–7 to build
+> the workspace (protocol → search → screening → retrieval → extraction → PRISMA report),
+> then step 8 (`portal`) turns that workspace into a single portable, self-contained
+> `index.html`. Because the generator is driven entirely by the files the pipeline writes
+> (at the exact paths in the Directory-Structure contract above), the same command works
+> for *any* review topic — and an incomplete review still yields a complete, readable
+> portal with honest placeholders for whatever is missing.
+
+## Directory Structure & File-Naming Contract (per review)
 
 > Default output root: `./reviews/{topic_slug}/` (e.g. `./reviews/photobiological-hydrogen-production/`).
-> All sub-directories are created by `srw_cli.py init`.
+> All sub-directories and the core files below are created by `srw_cli.py init` and the
+> subsequent steps. **The portal template reads the files exactly at these paths — do not
+> rename them or move them**, or the corresponding portal section will fall back to a
+> placeholder (see the section contract under the `portal` command).
 
 ```
 ./reviews/{topic_slug}/
-├── protocol.json                    # Locked research question, framework dimensions & criteria
+├── index.html                       # ★ Web portal (self-contained, Step 8) — DELIVERABLE
+├── viewer.html                      # ★ Artifact viewer (embedded, Step 8) — DELIVERABLE
+├── protocol.json                    # Locked topic, framework, dimensions & inclusion/exclusion criteria
 ├── audit_trail/
-│   └── lab_notebook.jsonl           # Append-only chronological audit log (timestamp, step, action, status)
+│   └── lab_notebook.jsonl           # Append-only chronological audit log (one JSON object per line)
 ├── data/
 │   ├── raw_search_results.bib       # Combined raw exports from all databases
-│   └── deduplicated_records.json    # Cleaned, deduplicated corpus
+│   └── deduplicated_records.json    # {"records":[...]} — the cleaned, deduplicated corpus (canonical order = Study #)
 ├── screening/
-│   ├── abstract_decisions.csv       # Title/abstract screening: include/exclude per record
-│   └── fulltext_exclusion_log.json  # Full-text exclusions with explicit rationales
+│   ├── abstract_decisions.csv       # cols: index,title,year,source,doi,decision,reason
+│   └── fulltext_exclusion_log.json  # screened/included(excluded) indices + rationale, fulltext_available, abstract_only
 ├── pdfs/
-│   ├── study_001.pdf                # Full-text PDFs (sequential naming)
+│   ├── study_001.pdf                # Full-text PDFs (sequential: study_NNN.pdf, NNN = record index)
 │   ├── study_002.pdf
-│   └── manifest.json                # SHA-256 hashes, source URLs, retrieval status
+│   └── manifest.json                # [{record_index,title,doi,path,error,fetched_at}, ...]
+├── fulltext/                        # (optional) extracted plain text study_NNN.txt, read for PDF-card digests
+│   └── study_001.txt
 ├── synthesis/
-│   ├── evidence_matrix.csv          # Structured data extraction sheet (ready for meta-analysis)
+│   ├── evidence_matrix.csv          # cols: source,doi,pmid,first_author,year,study_design,speech_task,acoustic_features,method,outcome,metric_value,mdd_primary,recorded_as
 │   └── extracted_variables.json     # Granular parsed variables (interventions, metrics, outcomes)
 └── report/
-    ├── PRISMA_flowchart.png         # PRISMA 2020 flow diagram
-    ├── prisma_flow.mmd              # Mermaid source (for regeneration)
+    ├── index.html                   # Copy of the portal (for report/ subpath serving)
+    ├── prisma_flow.mmd              # Mermaid PRISMA flow source (for regeneration)
+    ├── PRISMA_flowchart.svg         # PRISMA 2020 flow diagram (vector) — inlined into the portal
+    ├── PRISMA_flowchart.png         # PRISMA 2020 flow diagram (raster fallback)
     ├── systematic_review_draft.md   # Final manuscript draft
     ├── systematic_review_draft.tex  # LaTeX version
-    ├── prisma_checklist.md          # PRISMA 2027 checklist
+    ├── prisma_checklist.md          # PRISMA checklist
     └── figures/                     # scientific-visualization outputs (forest plots, heatmaps, etc.)
 ```
+
+**File-naming rules the template depends on**
+- `deduplicated_records.json` → top-level `{"records": [...]}`; the list order defines the
+  global **Study #** used across the matrix, PDF cards, and included list.
+- `screening/fulltext_exclusion_log.json` → `included`/`excluded` are **lists of record
+  indices** into `records`; matrix row *i* maps to `included[i]`.
+- `pdfs/manifest.json` → an array; each entry's `path` may be absolute or relative to the
+  review root *or* the skill root (the portal resolves both). `record_index` links a PDF
+  to its Study #.
+- `pdfs/study_NNN.pdf` → `NNN` == the record index (zero-padded to 3 digits).
+- `synthesis/evidence_matrix.csv` → header names are read by the portal (it is
+  column-agnostic), but the columns above are the canonical set.
+- `report/PRISMA_flowchart.svg` (preferred) or `.png` (fallback) → inlined into both
+  portal copies so the figure renders from `file://` and HTTP.
+- `index.html` == `report/index.html` (byte-identical).
 
 ## Rate Limiting
 
@@ -457,6 +590,7 @@ Every CLI command appends an **immutable JSONL entry** to
 | `step_5_fulltext_screening` | `screen-fulltext` |
 | `step_6_matrix_extraction` | `extract` |
 | `step_7_prisma_report_generation` | `report` |
+| `step_8_web_portal_generation` | `portal` |
 
 **Immutability & integrity**
 - The log is **append-only** — never rewrite or delete entries.

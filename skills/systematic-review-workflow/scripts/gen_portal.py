@@ -1395,17 +1395,106 @@ Workspace: <span class="mono">{ROOT}</span></p>
 
 HTML = "".join(parts)
 
-# PRISMA flow figure: inline the self-contained SVG so it renders from disk or HTTP in BOTH copies.
+# PRISMA flow figure: generate a self-contained SVG in the "neo" style (lavender nodes, purple strokes,
+# drop shadows, Trebuchet font).  This replaces the old "inline whatever file exists" approach so every
+# portal gets a consistent, good-looking diagram regardless of whether mermaid-cli was available.
+
+def _prisma_svg(n_identified, n_dedup, n_screened, n_abs_exc, n_ft_screen, n_ft_exc, n_included):
+    """Generate a self-contained PRISMA 2020 flow diagram SVG (neo style)."""
+    # Node layout: (cx, cy, label_line1, label_line2, is_final)
+    nodes = []
+    def _n(cx, cy, l1, l2, final=False):
+        nodes.append({"cx": cx, "cy": cy, "l1": l1, "l2": l2, "final": final})
+    _n(184, 60,   "Records identified",       "n=" + str(n_identified) if n_identified is not None else "—", False)
+    _n(184, 196,  "After duplicate removal",  "n=" + str(n_dedup) if n_dedup is not None else "—", False)
+    _n(184, 332,  "Screened at title/abstract","n=" + str(n_screened) if n_screened is not None else "—", False)
+    _n(88,  468,  "Excluded at abstract",     "n=" + str(n_abs_exc) if n_abs_exc is not None else "—", False)
+    _n(280, 468,  "Full-text screened",       "n=" + str(n_ft_screen) if n_ft_screen is not None else "—", False)
+    _n(184, 604,  "Excluded at full-text",    "n=" + str(n_ft_exc) if n_ft_exc is not None else "—", False)
+    _n(376, 604,  "Included in review",       "n=" + str(n_included) if n_included is not None else "—", True)
+
+    NW, NH = 152, 96  # node width/height
+    HW, HH = NW / 2, NH / 2
+
+    # Colors
+    fill = "#ECECFF"
+    stroke = "#9370DB"
+    ink = "#333333"
+    edge_c = "#333333"
+
+    parts = []
+    parts.append(f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="4 4 456 656" '
+                 f'style="max-width:456px;width:100%;height:auto;display:block;margin:0 auto;" '
+                 f'role="img" aria-label="PRISMA 2020 flow diagram">')
+    # CSS for font (avoids attribute-quoting issues with comma-separated font lists)
+    parts.append('<style>.lbl{font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:13px;fill:#333;}</style>')
+    # Defs: arrow marker + drop shadow
+    parts.append('<defs>'
+                 '<marker id="arr" viewBox="0 0 11.5 14" refX="11.5" refY="7" '
+                 'markerUnits="userSpaceOnUse" markerWidth="10.5" markerHeight="14" orient="auto">'
+                 f'<path d="M 0 0 L 11.5 7 L 0 14 z" fill="{edge_c}"/>'
+                 '</marker>'
+                 '<filter id="ds"><feDropShadow dx="1" dy="2" stdDeviation="2" flood-opacity="0.3" flood-color="#b9b9b9"/></filter>'
+                 '</defs>')
+
+    def edge(x1, y1, x2, y2):
+        """Simple straight edge."""
+        parts.append(f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" '
+                     f'stroke="{edge_c}" stroke-width="1.5" marker-end="url(#arr)"/>')
+
+    def edge_curve(x1, y1, x2, y2):
+        """Curved edge for split paths: down from (x1,y1), horizontal to x2, down to (x2,y2)."""
+        mid_y = (y1 + y2) / 2
+        parts.append(f'<path d="M{x1},{y1}L{x1},{mid_y-4}Q{x1},{mid_y} {x1+6 if x2>x1 else x1-6},{mid_y} '
+                     f'L{x2 - (6 if x2>x1 else -6)},{mid_y}Q{x2},{mid_y} {x2},{mid_y+4}L{x2},{y2}" '
+                     f'stroke="{edge_c}" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>')
+
+    # Edges
+    # A→B (straight down)
+    edge(184, 60 + HH, 184, 196 - HH)
+    # B→C (straight down)
+    edge(184, 196 + HH, 184, 332 - HH)
+    # C→D (split left to "Excluded at abstract")
+    edge_curve(162, 332 + HH, 88, 468 - HH)
+    # C→E (split right to "Full-text screened")
+    edge_curve(206, 332 + HH, 280, 468 - HH)
+    # E→F (split left to "Excluded at full-text")
+    edge_curve(258, 468 + HH, 184, 604 - HH)
+    # E→G (split right to "Included in review")
+    edge_curve(302, 468 + HH, 376, 604 - HH)
+
+    # Nodes
+    for i, nd in enumerate(nodes):
+        cx, cy = nd["cx"], nd["cy"]
+        rx, ry = cx - HW, cy - HH
+        # rect with shadow
+        parts.append(f'<rect x="{rx}" y="{ry}" width="{NW}" height="{NH}" rx="4" '
+                     f'fill="{fill}" stroke="{stroke}" stroke-width="1.5" filter="url(#ds)"/>')
+        # label text (2 lines, centered)
+        parts.append(f'<text x="{cx}" y="{cy - 6}" text-anchor="middle" class="lbl">{nd["l1"]}</text>')
+        parts.append(f'<text x="{cx}" y="{cy + 14}" text-anchor="middle" class="lbl">{nd["l2"]}</text>')
+
+    parts.append('</svg>')
+    return "".join(parts)
+
+# Build the PRISMA SVG
 _svg = ""
-_svg_path = _p("report", "PRISMA_flowchart.svg")
-if os.path.exists(_svg_path):
-    with open(_svg_path, "r", encoding="utf-8") as _f:
-        _svg = _f.read()
-    _svg = _svg.replace("style=\"max-width: 456px;\"", "style=\"max-width: 380px;height:auto;display:block;margin:0 auto;\"")
-    _edge_css = ("<style>.flowchart-link{stroke:#5eead4!important;stroke-width:2px!important;fill:none!important;} "
-                 ".arrowMarkerPath,.marker .arrowMarkerPath{fill:#5eead4!important;stroke:#5eead4!important;} "
-                 ".flowchart-link,.edge-pattern-solid{opacity:1!important;}</style>")
-    _svg = _svg.replace("<style>", _edge_css + "<style>", 1)
+# FT_SCR may be a list of indices (from screening log) — normalize to int
+_ft_scr_val = len(FT_SCR) if isinstance(FT_SCR, list) else FT_SCR
+if N is not None or FT_INC is not None:
+    _svg = _prisma_svg(
+        N,                 # identified
+        N,                 # dedup (same as identified in our pipeline)
+        N if ABS_IN is not None else None,  # screened
+        ABS_OUT,           # excluded at abstract
+        _ft_scr_val,       # full-text screened
+        FT_EXC,            # excluded at full-text
+        FT_INC,            # included
+    )
+    # Also write to report/ for standalone viewing
+    os.makedirs(_p("report"), exist_ok=True)
+    with open(_p("report", "PRISMA_flowchart.svg"), "w", encoding="utf-8") as _f:
+        _f.write(_svg)
 
 _prisma_html = HTML.replace("__PRISMA_FIGURE__", _svg) if _svg else HTML.replace(
     "__PRISMA_FIGURE__",

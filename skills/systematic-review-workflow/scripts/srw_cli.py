@@ -421,7 +421,13 @@ def cmd_fetch_fulltext(args) -> None:
 
   key = args.openalex_api_key or load_env_key("OPENALEX_API_KEY")
   manifest = read_json(p["pdf_manifest"]) if os.path.exists(p["pdf_manifest"]) else []
-  have = {m["record_index"] for m in manifest}
+  # Records with a valid path are done. Records with path=None are failures;
+  # with --retry-failed we drop them from the done-set so they get re-attempted.
+  if getattr(args, "retry_failed", False):
+    have = {m["record_index"] for m in manifest if m.get("path")}
+    manifest = [m for m in manifest if m.get("path")]
+  else:
+    have = {m["record_index"] for m in manifest}
 
   fetched, failed = 0, 0
   for i in included:
@@ -434,6 +440,10 @@ def cmd_fetch_fulltext(args) -> None:
     oa_url = rec.get("pdf_url") or ((rec.get("raw") or {}).get("open_access") or {}).get("oa_url")
     if oa_url and str(oa_url).startswith("http") and "content.openalex.org" not in str(oa_url):
       candidates.append(str(oa_url))
+    # OpenAlex best_oa_location.pdf_url (publisher/repo full text, often OA).
+    bl_pdf = ((rec.get("raw") or {}).get("best_oa_location") or {}).get("pdf_url")
+    if bl_pdf and str(bl_pdf).startswith("http") and str(bl_pdf) not in candidates:
+      candidates.append(str(bl_pdf))
     if rec.get("openalex_id") and key:
       candidates.append(f"https://content.openalex.org/{rec['openalex_id']}.pdf")
     out_path = os.path.join(p["pdfs_dir"], f"study_{i:03d}.pdf")
@@ -488,7 +498,7 @@ def cmd_register_pdf(args) -> None:
     sys.exit(f"Error: record index {args.record_index} out of range")
   rec = data["records"][args.record_index]
 
-  seq = args.record_index + 1
+  seq = args.record_index
   safe_name = "study_%03d" % seq
   dest = os.path.join(p["pdfs_dir"], f"{safe_name}.pdf")
   if os.path.abspath(args.pdf_path) != os.path.abspath(dest):
@@ -1107,6 +1117,8 @@ def main() -> None:
   sp.add_argument("--output-dir", required=True)
   sp.add_argument("--source", default="openalex", help="Source hint for PDF fetch (default: openalex)")
   sp.add_argument("--openalex-api-key", default="")
+  sp.add_argument("--retry-failed", action="store_true",
+                  help="Re-attempt records that previously failed (path=None) in the manifest")
   sp.set_defaults(func=cmd_fetch_fulltext)
 
   sp = sub.add_parser("register-pdf", help="Register an externally fetched PDF")

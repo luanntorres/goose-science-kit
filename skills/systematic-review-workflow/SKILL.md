@@ -162,10 +162,17 @@ Records abstract-level inclusion/exclusion decisions.
 | `--exclude` | no | Comma-separated record indices to exclude |
 
 ### `fetch-fulltext`
-Fetches full-text PDFs for included records. For records with an OpenAlex
-work ID, it downloads via `content.openalex.org` (requires
-`OPENALEX_API_KEY`), falling back to the record's `pdf_url`. Records from
-other sources (e.g. PubMed) can be fetched by the agent via
+Fetches full-text PDFs for included records. For each record it tries the
+candidate URLs **in order** and keeps the first that returns a valid
+`%PDF-`-prefixed file:
+
+1. the record's own open-access `pdf_url` / `raw.open_access.oa_url`,
+2. `raw.best_oa_location.pdf_url` (publisher/repository full text — this is
+   where most OA PDFs actually live, e.g. nature.com, eScholarship),
+3. `content.openalex.org/{work_id}.pdf` (only if `OPENALEX_API_KEY` is set;
+   it serves a small cached subset, so it is the *last* resort, not the first).
+
+Records from other sources (e.g. PubMed) can be fetched by the agent via
 `literature-search-openalex → download-pdf` or a local PDF and then registered
 with `register-pdf --record-index N --pdf-path /path/to.pdf`.
 Writes SHA-256 hashes to `pdfs/manifest.json`.
@@ -174,7 +181,14 @@ Writes SHA-256 hashes to `pdfs/manifest.json`.
 |---|---|---|
 | `--output-dir` | yes | Workspace directory |
 | `--openalex-api-key` | no | Override key (else reads `OPENALEX_API_KEY` from env/`~/.env`) |
+| `--retry-failed` | no | Re-attempt records already in the manifest with `path: null` (previously failed). Without this flag, any record present in the manifest is skipped, so a second run would do nothing. Use this after a partial run to pick up the failures. |
 
+> **Partial runs are normal.** Paywalled sources 404, and the OpenAlex content
+> server only has a subset of OA works cached. When a run is PARTIAL, re-run
+> with `--retry-failed` (optionally after a wait, or after the agent has
+> discovered a working mirror) — it only re-fetches the failures, never the
+> records that already have a PDF on disk.
+>
 > **Drop-in fix:** `scripts/fetch-fulltext-goose-corrected.py` is a standalone
 > replacement that fixes two bugs in the built-in `fetch-fulltext` — (1) the
 > undefined `args.source` reference, and (2) missing `%PDF` magic-byte
@@ -274,12 +288,61 @@ Outputs (byte-identical copies):
 | **Theme** | Dark mode is the **default** (unchanged). A **Light mode** is available via a fixed top-right toggle button (`◐` / `☀` icon + "Light"/"Dark" label). Preference persists in `localStorage['srw-theme']`. Light theme overrides the same CSS custom properties (`--bg`, `--panel`, `--ink`, `--acc`, etc.) via `body.light{…}` — no separate stylesheet. |
 | **Scrollbars** | All scrollable regions use **high-contrast scrollbars**: 14 px wide/tall, rounded thumb in `var(--th)` (teal `#0d9488` dark / `#0d9488` light), 3 px border matching `--panel2` for a floating-thumb look. Implemented via `scrollbar-color` (Firefox) **and** `::-webkit-scrollbar-thumb` (WebKit/Chrome). Applies globally via `*{scrollbar-color:…}`. |
 | **Included / Excluded lists** | Both panels use **bullet points** (`<ul>`) with a **bold `#NNN` ID** prefix — no `<ol>` auto-numbering, no doubled "1. 1." pattern. Example: `• #5 Neurophysiological Vocal Source Modeling… — https://doi.org/…`. CSS: `.inc-list` and `.excl-list` share the same 13.5 px font, 7 px li margin, 18 px left padding. |
-| **Feature-family chart** | "Dominant feature family" classifies each study into a **single dominant family** (max **5 classes**) — it takes the *first* (dominant) token of `acoustic_features`, folds synonyms onto a canonical set (prosody, pitch/F0, rhythm/temporal, spectral/MFCC, other-micro), and merges any tail beyond the top 4 into "Other". It does **not** count the verbatim feature string (which would yield 40+ near-duplicate bars). |
-| **Headline stats (exec summary)** | Four headline chips computed **generically** from the evidence matrix: ① Mean AUC/ROC (outcome contains "auc"/"roc", normalised 0–1), ② Mean accuracy (outcome contains "acc" but not "auc", shown as %), ③ Dominant feature (top family from the classifier above, as `n/total`), ④ 2023+ studies (count of rows with year ≥ 2023). Each chip is **omitted** when the data isn't present, so the block degrades gracefully for any review. |
+| **Feature-family chart** | "Dominant feature family" (the **primary axis**, configurable via `primary_axis`) classifies each study into a **single dominant family** (capped to N classes, default 5) — it takes the *first* (dominant) token of the primary column, folds synonyms onto a canonical set (via `family_synonyms`), and merges any tail beyond the top N-1 into "Other". It does **not** count the verbatim string (which would yield 40+ near-duplicate bars). The canonical set and cap are per-review (e.g. MDD folds onto prosody/pitch/rhythm/spectral/other-micro; a COF review folds onto immune-mechanism classes). |
+| **Headline stats (exec summary)** | Up to four headline chips computed **generically** from the evidence matrix. AUC/ROC and accuracy are **opt-in** — they only render when `metrics` in `portal_config.json` includes `auc`/`roc` and `acc` respectively (so they appear on classifier reviews like MDD and are cleanly omitted on non-classifier reviews like H₂ or COF). The remaining two chips are always shown: ③ Dominant feature (top family from the primary axis, as `n/total`), ④ 2023+ studies (count of rows with year ≥ 2023). Each chip is **omitted** when the data isn't present, so the block degrades gracefully for any review. |
 | **Sidenav** | Sticky left sidebar (220 px) with numbered section links; active section highlighted via `IntersectionObserver` scroll-spy. Collapses below 900 px viewport. |
 | **Scroll panels** | Section 5 (matrix) and Section 7 (included/excluded) use full-height scroll panels: `.cols-tall{height:560px}` + `.scrollfill{flex:1;overflow:auto}` so the content scrolls independently while the section header and sidenav stay fixed. |
 | **Self-contained** | Zero external deps (no CDN, no `fetch`, no build step). All CSS/JS inline. SVG charts hand-built. Works from `file://` and HTTP. |
-| **DOI links** | Bare `10.xxx` strings are auto-prefixed to `https://doi.org/10.xxx` in all rendered output. |
+| **DOI links** | Bare `10.xxx` strings are auto-prefixed to `https://doi.org/10.xxx`. In the matrix, each row's DOI cell renders a compact **`DOI` pill-link** (opens the publisher page) on line 1, with the **study title** (truncated ~90 ch) and **first author** as a sub-line on line 2. If there is no DOI but a PMID, the pill links to the PubMed page instead. |
+
+**Portal config contract (`portal_config.json`) — per-review, lives in the review's own directory**
+
+The portal is **config-driven**: a `portal_config.json` in the review root overrides
+any topic-specific labelling. This is what stops one topic's vocabulary (e.g. MDD's
+"acoustic features", "speech task") leaking into another topic's portal. **Store it in
+the review directory, never in the skill** — the skill ships the *mechanism*, the
+review ships its *content*. When the file is absent, the portal auto-detects sensible
+defaults from the matrix header (multi-item columns → family chart, single-value
+columns → bar chart).
+
+```jsonc
+{
+  // Chart panels (in order). `type`:
+  //   "hbars"  – categorical bar breakdown of one column
+  //   "count"  – how many ;-delimited items each study reports
+  //   "family" – dominant token + synonym fold + cap N  (see family_synonyms)
+  "chart_panels": [
+    { "column": "mechanism",      "title": "H2 production mechanism", "type": "family", "cap": 6 },
+    { "column": "light_regime",   "title": "Light regime",            "type": "hbars"  },
+    { "column": "recorded_as",    "title": "Full-text coverage",      "type": "hbars"  }
+  ],
+  // Fold raw token variants onto a canonical family name (lowercase keys).
+  "family_synonyms": { "cyanobacterium": "cyanobacteria", "green alga": "green algae" },
+
+  // Primary axis: which column drives the "Dominant X" headline chip + the
+  // scatter-plot / PDF-summary axis. Must be a column present in chart_panels.
+  "primary_axis": { "column": "mechanism", "title": "H2 production mechanism" },
+
+  // Matrix table columns (omit to show all). Order preserved.
+  "matrix_columns": ["organism", "mechanism", "light_regime", "h2_yield", "recorded_as"],
+  // Matrix filter dropdowns (omit to auto-pick the first two low-cardinality cols).
+  "filter_columns": ["organism", "mechanism"],
+
+  // Opt-in headline metrics. Only "auc"/"roc" and "acc"/"accuracy" are
+  // recognised; leave [] (or omit) for non-classifier reviews so those chips
+  // are cleanly absent.
+  "metrics": [],
+
+  // Free-text note rendered under the headline stats (e.g. why the readouts
+  // are heterogeneous and can't be pooled).
+  "summary_note": "Studies report H2 yield/rate/efficiency under diverse conditions; there is no single pooled metric."
+}
+```
+
+> **Rule of thumb:** every review that is *not* a classifier benchmark should
+> ship a `portal_config.json` with `metrics: []` so the AUC/accuracy chips do
+> not render with a misleading `n/a`. The MDD review is the only one that keeps
+> `metrics: ["auc", "accuracy"]`.
 
 | Flag | Required | Description |
 |---|---|---|
@@ -495,8 +558,9 @@ uv run scripts/srw_cli.py selftest   # exit 0 = PASS, non-zero = FAIL
 ├── fulltext/                        # (optional) extracted plain text study_NNN.txt, read for PDF-card digests
 │   └── study_001.txt
 ├── synthesis/
-│   ├── evidence_matrix.csv          # cols: source,doi,pmid,first_author,year,study_design,speech_task,acoustic_features,method,outcome,metric_value,mdd_primary,recorded_as
+│   ├── evidence_matrix.csv          # cols: record_index,doi,title, <topic-specific columns>, recorded_as  (column-agnostic — driven by the protocol/extract step)
 │   └── extracted_variables.json     # Granular parsed variables (interventions, metrics, outcomes)
+├── portal_config.json               # (optional) per-review portal customisation — see "Portal config contract" below
 └── report/
     ├── index.html                   # Copy of the portal (for report/ subpath serving)
     ├── prisma_flow.mmd              # Mermaid PRISMA flow source (for regeneration)
@@ -519,6 +583,10 @@ uv run scripts/srw_cli.py selftest   # exit 0 = PASS, non-zero = FAIL
 - `pdfs/study_NNN.pdf` → `NNN` == the record index (zero-padded to 3 digits).
 - `synthesis/evidence_matrix.csv` → header names are read by the portal (it is
   column-agnostic), but the columns above are the canonical set.
+- `portal_config.json` → **optional** per-review customisation (labels, chart
+  panels, matrix columns, headline metrics, primary axis, family synonyms).
+  When absent, the portal auto-detects a sensible default from the matrix
+  header. See the "Portal config contract" below for the full schema.
 - `report/PRISMA_flowchart.svg` (preferred) or `.png` (fallback) → inlined into both
   portal copies so the figure renders from `file://` and HTTP.
 - `index.html` == `report/index.html` (byte-identical).

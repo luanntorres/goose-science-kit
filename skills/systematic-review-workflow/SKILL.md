@@ -1,5 +1,7 @@
 ---
 name: systematic-review-workflow
+version: 1.1.0
+updated: 2026-11-08
 description: >
   Executes an end-to-end, PRISMA 2020 and framework-guided (PICO, PECO, SPIDER, CIMO)
   literature selection, extraction, and synthesis pipeline with immutable lab notebook
@@ -706,3 +708,54 @@ that never touches network, keys, or the live review workspace.
 4. **Ignoring the audit trail.** If a step fails, the audit log records the
    failure. Do NOT delete failed entries — they are part of the reproducibility
    record.
+
+## Changelog
+
+### v1.1.0 — 2026-11-08
+**Config-driven portal + robust full-text retrieval.**
+
+- **`portal_config.json` contract (new).** The portal is now fully
+  config-driven so each review's vocabulary, charts, matrix columns, headline
+  metrics, and primary axis are per-review content that lives in the review's
+  own directory — not baked into the skill. Stops one topic's labels (e.g. MDD's
+  "acoustic features"/"speech task") leaking into another topic's portal.
+  See "Portal config contract" above for the full schema.
+  - Panel types: `hbars` (categorical bars), `count` (items-per-study),
+    `family` (dominant token + synonym fold + cap N).
+  - AUC/ROC and accuracy headline chips are **opt-in** via `metrics` (default
+    off), so non-classifier reviews no longer show misleading `n/a` chips.
+  - `primary_axis` drives the "Dominant X" chip, scatter-plot, and PDF digests.
+  - `family_synonyms`, `matrix_columns`, `filter_columns`, and `summary_note`
+    are all configurable.
+- **Full-text retrieval (improved).**
+  - `fetch-fulltext`: added `--retry-failed` to re-attempt records that
+    previously failed (`path: null`) without touching records that already have
+    a PDF on disk.
+  - `fetch-fulltext`: added `raw.best_oa_location.pdf_url` (publisher/repo
+    full text) as a first-tier candidate. This is where most OA PDFs actually
+    live; `content.openalex.org` is now the *last* resort (it caches only a
+    subset of OA works).
+  - `register-pdf`: fixed off-by-one naming — was `study_{i+1}`, now
+    `study_{i}` to match the 0-based `fetch-fulltext` / `manifest` contract.
+- **Portal UI (frozen + documented).**
+  - Evidence-matrix **DOI cell** renders a compact `DOI` pill-link (or
+    `PubMed` when no DOI) on line 1 with the study title and first author on
+    line 2.
+  - Fixed evidence-matrix column alignment (each cell wrapped in `<td>`).
+  - `_cap_n` family-capping fixed (was treating `(key, value)` tuples as keys).
+  - Frozen UI/UX spec (dark-default theme, high-contrast scrollbars, bullet
+    included/excluded lists, sticky sidenav, self-contained HTML) documented
+    and generalized off the MDD-specific column names.
+
+### v1.0.0 — 2026-11-07
+**Initial skill release.**
+
+- End-to-end PRISMA 2020 pipeline: `init` → `protocol` → `search` (multi-database)
+  → `abstract-screen` → `fetch-fulltext` → `screen-fulltext` → `extract` →
+  `report` → `portal`.
+- Immutable JSONL lab-notebook audit trail with SHA-256 checksums and
+  `verify` for tamper-evidence.
+- Self-contained HTML web portal (8 fixed sections, inline SVG PRISMA diagram,
+  light/dark theme, artifact viewer) — works from `file://` and HTTP with zero
+  external dependencies.
+- Hermetic `selftest` regression (no network/keys/live workspace).

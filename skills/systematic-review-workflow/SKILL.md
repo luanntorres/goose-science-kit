@@ -1,7 +1,7 @@
 ---
 name: systematic-review-workflow
-version: 1.2.0
-updated: 2026-11-08
+version: 1.3.0
+updated: 2026-11-09
 description: >
   Executes an end-to-end, PRISMA 2020 and framework-guided (PICO, PECO, SPIDER, CIMO)
   literature selection, extraction, and synthesis pipeline with immutable lab notebook
@@ -208,6 +208,66 @@ provided one.
 | `--output-dir` | yes | Workspace directory |
 | `--record-index` | yes | Index of the record in `deduplicated_records.json` |
 | `--pdf-path` | yes | Local path to the PDF |
+
+### `zotero-import` (standalone script)
+
+Bulk-import full-text PDFs from a **local Zotero library** into a review
+workspace, then re-run the downstream pipeline (re-screen → extract → report →
+portal → verify). Use this when the user already has the full texts in Zotero
+and Zotero has no index number tying a PDF to the review's record IDs — the
+script matches PDFs to the evidence matrix **by DOI**, which is the
+index-independent key.
+
+This is a standalone script (not a `srw_cli.py` subcommand) that drives the CLI
+for every mutating step, so the audit ledger stays consistent.
+
+```bash
+# Dry run — discover + match + print the plan, change nothing
+python3 scripts/zotero_import.py --output-dir ./reviews/<topic> \
+    --collection photobiological-hydrogen-production --dry-run
+
+# Full import + re-run
+python3 scripts/zotero_import.py --output-dir ./reviews/<topic> \
+    --collection photobiological-hydrogen-production
+```
+
+| Flag | Required | Description |
+|---|---|---|
+| `--output-dir` | yes | Review workspace directory |
+| `--collection` | yes | Zotero collection name (substring) or 8-char key |
+| `--api` | no | Zotero base URL (default `http://localhost:23119/api`) |
+| `--server-id` | no | `Zotero-Server-ID` (auto-detected via `/connector/ping` if omitted) |
+| `--dry-run` | no | Discover + match + print plan only; change nothing |
+| `--no-rerun` | no | Register PDFs but skip the screen/extract/report/portal/verify re-run |
+| `--json-out` | no | Also write the match plan to this JSON path |
+| `--extract-cols` | no | Comma-separated extract columns (defaults to the biology schema) |
+
+**What it does (8 stages):**
+1. **Discover** — paginates the collection's PDF attachments from the Local API
+   and resolves each attachment's parent item for DOI + title + `file://` path.
+2. **Match** — builds a DOI→record_index map from `synthesis/evidence_matrix.csv`
+   and classifies each PDF as *new*, *already registered*, *matched-but-missing*,
+   or *unmatched* (not in the matrix). Duplicates (same record) are collapsed; the
+   on-disk copy wins.
+3. **Register** — one `register-pdf` per new match (copy + SHA-256 + manifest +
+   audit entry).
+4. **Re-screen** — `screen-fulltext` with the existing include/exclude sets
+   (recomputes `fulltext_available` from the manifest automatically).
+5. **Extract** — rebuilds the extract data-file from the matrix, flipping
+   `recorded_as` to `full-text` for every record that now has a PDF, then `extract`.
+6. **Report** — `report` (PRISMA SVG + markdown + LaTeX).
+7. **Portal** — `portal` (`index.html` + `viewer.html`).
+8. **Verify** — `verify` (audit checksums + chronology).
+
+**Prerequisite:** enable Zotero's Local API —
+*Edit/Tools → Settings → Advanced → "Allow other applications on this computer
+to communicate with Zotero"*. The script is read-only against the library.
+
+**Known behaviour:** the matrix can contain **duplicate DOIs** under two record
+indices (e.g. the same paper at rec 45 and rec 443). The script matches to the
+*first* occurrence and skips the rest, so an already-registered duplicate won't
+be re-registered. If you need the PDF under a specific duplicate, register it
+manually with `register-pdf --record-index <N>`.
 
 ### `screen-fulltext`
 Records full-text-level inclusion/exclusion with mandatory rationales.
@@ -448,6 +508,11 @@ uv run scripts/srw_cli.py selftest   # exit 0 = PASS, non-zero = FAIL
 2. Verify `pdfs/manifest.json` contains SHA-256 hashes for all included records.
 3. If PDFs are unavailable (paywalled), log to audit trail and continue with
    abstract-only records.
+4. **Zotero full texts (preferred when the user already has them):** if the
+   user's full texts live in a local Zotero library, use
+   `scripts/zotero_import.py` to import them **by DOI match** and re-run the
+   downstream pipeline in one command. This bypasses the paywall and uses the
+   user's own copies. See the "zotero-import" section in the CLI Reference.
 
 ### Step 5 — Full-Text Screening
 1. **Agent** reads full-text content (or abstract if no PDF) for each included record.
@@ -718,6 +783,34 @@ that never touches network, keys, or the live review workspace.
    record.
 
 ## Changelog
+
+### v1.3.0 — 2026-11-09
+**Zotero full-text import + portal stat-card fix.**
+
+- **New `scripts/zotero_import.py`** — standalone, stdlib-only helper that
+  bulk-imports full-text PDFs from a **local Zotero library** (Local API,
+  `localhost:23119`) into a review workspace, matched to the evidence matrix **by
+  DOI** (index-independent), then drives the CLI through re-screen → extract →
+  report → portal → verify. Read-only against Zotero. See the new
+  "zotero-import" section for flags and the 8-stage flow.
+  - Handles collection **pagination** (`Link: rel="next"`), parent-item DOI/title
+    resolution, `file://` path decoding, and duplicate-record collapse.
+  - `--dry-run` (plan only), `--no-rerun` (register only), `--json-out`.
+  - Documented the **duplicate-DOI** matrix behaviour (matches the first
+    occurrence; the rest are skipped) so already-registered duplicates aren't
+    re-registered.
+  - Verified end-to-end on a live library: discovered 627 items / 189 PDF
+    attachments, matched to a 282-row matrix, classified new/already/missing.
+- **Portal bug fix — `gen_portal.py` "Full-text screened" stat card.**
+  - `FT_SCR` was read as the raw **list** of screened indices
+    (`ft.get("screened")`) but rendered behind an `isinstance(FT_SCR, int)` guard,
+    so the stat card showed "—" while the PRISMA SVG (which uses
+    `_prisma_counts` → `len(screened)`) correctly showed the count. Normalised
+    `FT_SCR` to its length at definition time so the stat card, the figure
+    caption, and the PRISMA SVG all agree (e.g. `304`).
+- **`register-pdf`:** naming note — the CLI copies to `study_{i}.pdf` using the
+  0-based record index (consistent with the manifest contract). When registering
+  by the evidence-matrix `record_index`, use that index verbatim.
 
 ### v1.2.0 — 2026-11-08
 **Self-contained PRISMA flow diagram (shared module).**

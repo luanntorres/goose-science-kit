@@ -108,7 +108,8 @@ N = len(recs) if recs else 0
 ABS_IN  = sum(1 for r in ad_rows if (r.get("decision") or "").lower() == "included") if ad_rows else None
 ABS_OUT = sum(1 for r in ad_rows if (r.get("decision") or "").lower() == "excluded") if ad_rows else None
 if isinstance(ft, dict):
-    FT_SCR   = ft.get("screened"); FT_INC = len(ft.get("included", []) or []); FT_EXC = len(ft.get("excluded", []) or [])
+    _scr = ft.get("screened"); FT_SCR = len(_scr) if isinstance(_scr, list) else _scr
+    FT_INC = len(ft.get("included", []) or []); FT_EXC = len(ft.get("excluded", []) or [])
     FT_AVAIL = ft.get("fulltext_available"); ABS_ONLY = ft.get("abstract_only")
 else:
     FT_SCR = FT_INC = FT_EXC = FT_AVAIL = ABS_ONLY = None
